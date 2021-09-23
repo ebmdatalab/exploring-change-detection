@@ -43,7 +43,7 @@ An `arguments` list is used here to mimic the input from the command line.
 arguments = vector( "list", 5 ) %>% unlist
 arguments[1] = "."
 arguments[2] = "OUTPUT.Rdat"
-arguments[4] = "change_detection/change_detection"
+arguments[4] = "change_detection"
 arguments[6] = "yes" # Should we draw figures?
 
 ```
@@ -61,7 +61,7 @@ load(arguments[2]) # Load the example data
 arguments = vector( "list", 5 ) %>% unlist
 arguments[1] = "."
 arguments[2] = "OUTPUT.Rdat"
-arguments[4] = "change_detection/change_detection"
+arguments[4] = "change_detection"
 arguments[5] = "both"
 arguments[6] = "yes" # Should we draw figures?
 
