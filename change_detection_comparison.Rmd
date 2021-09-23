@@ -1,0 +1,676 @@
+---
+title: "Change detection exploration"
+author: "Lisa Hopcroft"
+date: "14/09/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+rm( list=ls() )
+
+knitr::opts_chunk$set(echo = FALSE)
+
+library(caTools)
+library(gets) ### main package for break detection - see Pretis, Reade, and Sucarrat, Journal of Stat. Software, in press.
+
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(cowplot)
+library(knitr)
+library(tidyr)
+library(glue)
+
+source("change_detection_comparison_functions.R")
+
+old <- theme_set(theme_bw())
+theme_set(theme_bw())
+
+
+```
+
+# Investigating the {gets} package
+
+This document has been generating in an attempt to understand the output
+from the {gets} package as used in the [Change Detection repo](https://github.com/ebmdatalab/change_detection),
+as at [this commit](https://github.com/ebmdatalab/change_detection/commit/61a4f714ef6b3c807d3bbf10c6a0f2b495f95018).
+
+An `arguments` list is used here to mimic the input from the command line.
+
+```{r setting_arguments}
+
+arguments = vector( "list", 5 ) %>% unlist
+arguments[1] = "."
+arguments[2] = "OUTPUT.Rdat"
+arguments[4] = "change_detection/change_detection"
+arguments[6] = "yes" # Should we draw figures?
+
+```
+
+It uses an example file (`r arguments[2]`) which was contains dummy data generated
+via OpenSAFELY for PINCER.
+
+```{r}
+
+setwd(arguments[1]) # Set working directory
+load(arguments[2]) # Load the example data
+
+### This has to be run again as the file will have a variable 
+### "arguments" which will overwrite what we have done above.
+arguments = vector( "list", 5 ) %>% unlist
+arguments[1] = "."
+arguments[2] = "OUTPUT.Rdat"
+arguments[4] = "change_detection/change_detection"
+arguments[5] = "both"
+arguments[6] = "yes" # Should we draw figures?
+
+
+# result.list contains a gets output for each variable
+# vars.list tells us how many variables have been analysed
+vars.list <- length(result.list)
+
+saveplots_analysis <- FALSE ###save plots of output of analysis
+if (arguments[6] == 'yes'){
+  saveplots_analysis <- TRUE
+}
+
+fig_path_tis_analysis <- "figures/" ###set path to store analysis figures
+
+```
+
+## Results calibration
+
+There are some variables that control which results are extracted from
+the models. These are:
+
+```{r results_calibration}
+
+###### Timing Measures
+known.t <- 0 ### Time of known intervention in the sample, e.g. medication became available as generic at observation t=18
+break.t.lim <- .8 ### Proportion offset after break 
+
+###### Slope Measures
+slope.lim <- 0.5   ### Proportion of slope drop for construction of slope measure
+
+#########################
+#########################
+```
+
+- `known.t` (`r known.t`): time of known intervention in the sample
+(e.g., medication became available as generic at observation)
+- `break.t.lim` (`r break.t.lim`): proportion offset after a break
+- `slope.lim` (`r slope.lim`): proportion of slope drop for construction of
+slope measure
+
+**Definition of offset: to complete**
+
+## Capturing the relevant results
+
+There will be a row for each of the variables that have been analysed. The
+results outputs are stored in a dataframe (`results`) with the following
+columns:
+
+- `is.nbreak`: number of breaks
+- `is.tfirst`: first break (up/down/both as requested)
+- `is.tfirst.pknown`: First break after a known intervention date (up/down/both as requested)
+- `is.tfirst.pknown.offs`: First break after a known intervention date not offset by a XX% increase (up/down/both as requested)
+- `is.tfirst.offs`: First break not offset by a XX% increase (up/down/both as requested)
+- `is.tfirst.big`: steepest break as identified by is.slope.ma
+
+Specific information regarding the steepest segment are recorded:
+
+- `is.slope.ma`: Average slope over steepest segment contributing at least XX% of total drop
+- `is.slope.ma.prop`: Average slope as proportion to prior level
+- `is.slope.ma.prop.lev`:  Percentage of the total drop the segment used to evaluate the slope makes up
+
+Specific information regarding the level measures are recorded in these
+variables:
+
+- `is.intlev.initlev`: Pre-drop level
+- `is.intlev.finallev`: End level
+- `is.intlev.levd`: Difference between pre and end level
+- `is.intlev.levdprop`: Proportion of drop
+
+
+```{r results_setup}
+
+results = make_empty_results_holder( names.rel )
+
+```
+
+## Looking at the results
+
+There are `r length(names.rel)` variables in the results file that we want to
+look at: `r combine_words(names.rel)`.
+
+```{r fig.height=16, fig.width=12}
+
+for ( i in 1:length(names.rel)) {
+  
+  cat( glue("[{i}] {names.rel[i]}\n\n"))
+  
+  offset_plot = NULL
+  sum_plot = NULL
+  mean_plot = NULL
+  window_plot = NULL
+  slope_plot = NULL
+  composite_plot = NULL
+  
+  y <- data.pick[names.rel[i]]
+  results$name[i] <- names.rel[i]
+  islstr.res <- result.list[[i]]
+  
+  # additional source code for trend functions for analysis
+  source(file.path(arguments[4], "trend_isat_functions.R"))
+  
+  real_data = data.frame(
+    x = 1:nrow(data.pick),
+    y = y ) %>%
+    rename( y = !!sym(names.rel[i]) )
+  
+  ### Number of trend breaks
+  nbreak <- NROW(grep("tis", islstr.res$ISnames)) 
+  results$is.nbreak[i] <-  nbreak #number of breaks
+  
+  ### coefficient path 
+  tis.path <- trend.var(islstr.res)
+  
+  base_plot_data = real_data %>% 
+    mutate( ym = tis.path$indic.fit$indic.fit+islstr.res$coefficients[islstr.res$specific.spec["mconst"]] ) %>% 
+    pivot_longer( -x,
+                  names_to = "y_origin",
+                  values_to = "y" ) %>% 
+    mutate( y_origin = factor( y_origin, levels = c( "ym", "y"), ordered=TRUE))
+  
+  base_plot = ggplot( base_plot_data,
+                      aes(x  = x,
+                          y  = y,
+                          col = y_origin,
+                          size=y_origin,
+                          alpha=y_origin)) +
+    geom_point() +
+    geom_line() +
+    scale_size_manual( values=c( y  = 0.5,
+                                 ym = 2 ) ) +
+    scale_alpha_manual( values=c( y  = 1,
+                                  ym = 0.5 ) ) +
+    scale_colour_manual( values=c( y  = "black",
+                                   ym = "orange" ) ) +
+    labs( title = "Time series data + model",
+          subtitle = names.rel[i] )
+  
+  if (nbreak > 0){ ##if there are any relevant breaks
+    
+    #trend break names:
+    tnames <- islstr.res$ISnames[grep("tis", islstr.res$ISnames)]
+    
+    if (NCOL(islstr.res$aux$mX[,tnames]) > 1){
+      tdates <-  apply(islstr.res$aux$mX[,tnames],2,function(x) (which(x>0))[1])  ##finds first non-zero index
+    } else {
+      tdates <-  min(which(islstr.res$aux$mX[,tnames] > 0))
+    }
+    
+    ###coefficients and fitted values
+    rel.coef.num <- islstr.res$specific.spec[tnames]
+    rel.coef <- islstr.res$coefficients[rel.coef.num]
+    mconst.res <- islstr.res$coefficients[islstr.res$specific.spec["mconst"]]
+    fit.res <- fitted(islstr.res) ##fitted values
+    fit.res <- fit.res[!fit.res<0]
+    
+    direction = ""
+    
+    #### Measure 1.1: the first breaks where the coefficient path is also downward sloping
+    if (arguments[5] == 'both'){
+      direction <- 'min(which(tis.path$indic.fit$coef != 0))'
+    } else if (arguments[5] == 'up'){
+      direction <- 'min(which(tis.path$indic.fit$coef > 0))'
+    } else if (arguments[5] == 'down'){
+      direction <- 'min(which(tis.path$indic.fit$coef < 0))'
+    }
+    
+    # cat( sprintf( "147: direction: %s\n", direction ) )
+    # Sys.sleep( 3 ) 
+    is.first <- eval(parse(text=direction)) 
+    results$is.tfirst[i] <- is.first
+    
+    
+    ### Measure 1.2: first negative break after the known break-date intervention
+    if (arguments[5] == 'both'){
+      direction <- 'min( tdates[which(tis.path$indic.fit$coef[tdates] != 0)][tdates[which(tis.path$indic.fit$coef[tdates] != 0)] > known.t] )'
+    } else if (arguments[5] == 'up'){
+      direction <- 'min( tdates[which(tis.path$indic.fit$coef[tdates] > 0)][tdates[which(tis.path$indic.fit$coef[tdates] > 0)] > known.t] )'
+    } else if (arguments[5] == 'down'){
+      direction <- 'min( tdates[which(tis.path$indic.fit$coef[tdates] < 0)][tdates[which(tis.path$indic.fit$coef[tdates] < 0)] > known.t] )'
+    }
+    
+    # cat( sprintf( "163: direction: %s\n", direction ) )
+    # Sys.sleep( 3 ) 
+    
+    is.first.pknown <- eval(parse(text=direction))
+    results$is.tfirst.pknown[i] <- is.first.pknown
+    
+    
+    #### Measure 1.3: the first break where there is no subsequent offset of at least break.t.lim
+    offset <- array(NA, dim=NROW(tdates))
+    
+    ### levels records the change in fit values between
+    ### each break point and the next one (or the end)
+    levels <- array(NA, dim=NROW(tdates))
+    
+    for (j in 1:NROW(tdates)){
+      
+      ###for each break, compute the total change
+      date <- tdates[j]
+      
+      ### If the date is one of the break dates, then look to the 
+      ### next break date. If it is the last break date or beyond
+      ### the last break date, then look to the last date of the
+      ### whole dataset.
+      if (j < NROW(tdates)){
+        enddate <- tdates[j+1]
+      } else {
+        enddate <- NROW(tis.path$indic.fit$indic.fit)
+      }
+      startlev <- tis.path$indic.fit$indic.fit[date-1]
+      endlev <- tis.path$indic.fit$indic.fit[enddate-1]
+      levchange <- endlev - startlev
+      
+      levels[j] <- levchange
+      
+    }
+    
+    ### This is the change at the next break, expressed
+    ### as a proportion of the change at the current break.
+    ### So values > 1 are representative of the next change
+    ### being bigger than the current change, and values < 1
+    ### are representative of the next change being smaller
+    ### than the current change.
+    ratios <- array(NA, dim=(NROW(levels)-1))
+    
+    if ( NROW(levels) > 1){
+      
+      for (j in 1: (NROW(levels)-1)){
+        
+        ratios[j] <-  levels[j+1]/levels[j]
+        
+        # cat( glue( "Moving between timepoints {tdates[j]} - {tdates[j+1]}:\n\n" ) )
+        # cat( glue( "- at timpoint {tdates[j]}, the level has changed {levels[j]} compared to the previous timepoint\n\n"))
+        # cat( glue( "- at timpoint {tdates[j+1]}, the level has changed {levels[j+1]} compared to the previous timepoint\n\n"))
+        # cat( glue( "- this is a change of {ratios[j]}\n\n" ) )
+        
+        ### Previous code
+        ### -------------
+        if (ratios[j] < -break.t.lim & !is.na(ratios[j])){
+          offset[j] <- TRUE
+          # cat( glue( "- the change at {tdates[j]} - {tdates[j+1]} is OFFSET!\n\n" ) )
+          
+        } else {
+          offset[j] <- FALSE
+        }
+        
+        offset[NROW(levels)] <- FALSE
+      }
+      
+    } else {
+      offset <- FALSE 
+    } 
+    
+    
+    ### ORIGINAL
+    
+    # base_plot_data_annotated = base_plot_data %>%
+    #   filter( y_origin == "y" ) %>% 
+    #   mutate( offset_start = x %in% c( tdates[which(offset)]) ) 
+    # 
+    # offset_data_0 = base_plot_data_annotated %>%
+    #   filter( x %in% tdates[c( which(offset),
+    #                            which(offset)+1)] ) %>%
+    #   mutate( position = ifelse( x %in% tdates[which(offset)],
+    #                              "start", "end") ) %>% 
+    #   mutate( level = levels[x-1] ) 
+    # 
+    # offset_data_1 = offset_data_0 %>% 
+    #   mutate( x = ifelse( position == "end",
+    #                       x-1,
+    #                       x) ) %>%
+    #   pivot_wider( c(x, position, level),
+    #                names_from = position,
+    #                values_from = level ) %>% 
+    #   mutate( ratio = ratios[x-1] )
+    # 
+    
+    
+    ### NEW
+    ##
+    base_plot_data_annotated = base_plot_data %>%
+      filter( y_origin == "y" ) %>%
+      mutate( offset_start = x %in% c( tdates[which(offset)]) )
+    
+    
+    start_d = base_plot_data_annotated %>%
+      filter(offset_start) %>%
+      mutate( offset_num = x)
+    end_d = base_plot_data_annotated %>%
+      filter(x %in% (start_d$x+1) ) %>%
+      mutate( offset_num = x-1) %>% 
+      mutate( offset_start = FALSE )
+    
+    offset_data_0 = start_d %>%
+      bind_rows( end_d ) %>% 
+      # filter( x %in% tdates[c( which(offset),
+      #                          which(offset)+1)] ) %>%
+      mutate( position = ifelse( offset_start, "start", "end" ) ) %>% 
+      mutate( level = levels[x-1] ) 
+    
+    offset_data_1 = offset_data_0 %>% 
+      pivot_wider( c(offset_num, position, level),
+                   names_from = position,
+                   values_from = level ) %>% 
+      mutate( ratio = ratios[offset_num-1] ) %>% 
+      rename( x = offset_num )
+    
+    offset_annotation = offset_data_1 %>%
+      mutate( label = sprintf("T[%d/%d]: %.2f to %.2f, ratio=%.2f",
+                              x, x+1, start, end, ratio ) )%>%
+      pull( label ) %>% paste(collapse="\n")
+    
+    
+    
+    
+    offset_plot = ggplot( base_plot_data_annotated, aes(x=x,y=y) ) +
+      scale_x_continuous(minor_breaks = seq(1, base_plot_data %>% pull(x) %>% max, 1) ) +
+      scale_size_manual( values=c( "TRUE"=3,
+                                   "FALSE"=1 ) ) +
+      scale_colour_manual( values=c( "TRUE"="red",
+                                     "FALSE"="black" ) ) +
+      annotate( "text", x=10, y=3, label=offset_annotation,
+                hjust=0, vjust=1 ) +
+      annotate( "segment",
+                x=offset_data_0 %>% filter(position=="start") %>% pull(x),
+                xend=offset_data_0 %>% filter(position=="end") %>% pull(x),
+                y=offset_data_0 %>% filter(position=="start") %>% pull(y),
+                yend=offset_data_0 %>% filter(position=="end") %>% pull(y),
+                col="red", size=3, alpha=0.5
+      ) +
+      geom_line() +
+      geom_point( aes(col=offset_start,
+                      size=offset_start) ) +
+      labs( title="Identifying offset changes" )
+    
+    y_locations = base_plot_data %>%
+      filter(y_origin=="y") %>%
+      pull(y) %>% generate_y_locations
+    
+
+    break_plot = offset_plot +
+      annotate( "segment",
+                x=c(is.first, is.first.pknown),
+                xend=c(is.first,is.first.pknown),
+                y=rep.int(Inf,2),
+                yend=rep.int(-Inf,2),
+                col="orange", size=1 ) +
+      annotate( "text",
+                x = c(is.first, is.first.pknown),
+                y = y_locations,
+                label = c("first break",
+                          glue("first break > known.t ({known.t})") ),
+                angle=90,
+                hjust=0,
+                vjust=c(-0.7, 1.3) )
+  
+    
+    ############ FUTURE - ADD IN OFFSETS *BEFORE* BREAK TOO ###############
+    ### Store first negative break which is not offset and which occurs after known break date
+    if (arguments[5] == 'both'){
+      direction <- 'min(tdates[rel.coef != 0 & tdates >= known.t & tis.path$indic.fit$coef[tdates] != 0 & offset == FALSE])'
+    } else if (arguments[5] == 'up'){
+      direction <- 'min(tdates[rel.coef > 0 & tdates >= known.t & tis.path$indic.fit$coef[tdates] > 0 & offset == FALSE])'
+    } else if (arguments[5] == 'down'){
+      direction <- 'min(tdates[rel.coef < 0 & tdates >= known.t & tis.path$indic.fit$coef[tdates] < 0 & offset == FALSE])'
+    }
+    
+    # cat( sprintf( "222: direction: %s\n", direction ) )
+    # Sys.sleep( 3 ) 
+    is.first.pknown.offs <- eval(parse(text=direction))
+    results$is.tfirst.pknown.offs[i] <- is.first.pknown.offs
+    
+    ### Store first negative break which is not offset  (regardless of known break date)
+    if (arguments[5] == 'both'){
+      direction <- 'min(tdates[rel.coef != 0  & tis.path$indic.fit$coef[tdates] != 0 & offset == FALSE])'
+    } else if (arguments[5] == 'up'){
+      direction <- 'min(tdates[rel.coef > 0  & tis.path$indic.fit$coef[tdates] > 0 & offset == FALSE])'
+    } else if (arguments[5] == 'down'){
+      direction <- 'min(tdates[rel.coef < 0  & tis.path$indic.fit$coef[tdates] < 0 & offset == FALSE])'
+    }
+    
+    # cat( sprintf( "238: direction: %s\n", direction ) )
+    # Sys.sleep( 3 ) 
+    is.first.offs <- eval(parse(text=direction))
+    results$is.tfirst.offs[i] <- is.first.offs
+    
+    ####
+    ####
+    #### 
+    ####
+    ####
+    
+    #############################################
+    ##### Measure 2 Steepness/Slope: average slope of the steepest contiguous segment contributing to at least XX% of the total level change
+    ################################################
+    #    print(!is.first==Inf)
+    
+    ### There is a datapoint for each timepoint here
+    coefp.dif <- tis.path$indic.fit$coef
+    const.path <-  tis.path$indic.fit$indic.fit
+    
+    first.index <-  which( tdates==is.first.pknown )
+    interval <- const.path[tdates[first.index:length(tdates)]-1]
+    
+    #predrop <- fit.res[is.first.pknown-1] #changed: FP Sept 13th.
+    predrop <- fit.res[is.first.pknown]
+    
+    #totaldif  <- sum(coefp.dif[(is.first.pknown-1):(NROW(coefp.dif))]) # total drop, change in every period, i.e. the slope #changed: FP Sept 13th.
+    
+    # Difference from the first break to the last timepoint
+    totaldif  <- sum(coefp.dif[(is.first.pknown):(NROW(coefp.dif))]) # total drop, change in every period, i.e. the slope
+    
+    # Number of points from the first break to the last timepoint
+    max_interval <- NROW(const.path) - is.first.pknown + 1
+    
+    grid_sum  <- matrix(NA, ncol=max_interval, nrow=max_interval)
+    grid_mean <- matrix(NA, ncol=max_interval, nrow=max_interval)
+    
+    #####Grid Search:
+    
+    ### Generating running mean of the coefficients using various size windows
+    
+    for (j in 1:max_interval){
+      grid_sum[,j] <- runmean(coefp.dif[(is.first.pknown):NROW(coefp.dif)], j, align="left", endrule="NA")*j  #sum over every length (columns) at every point (rows)
+      grid_mean[,j] <-  runmean(coefp.dif[(is.first.pknown):NROW(coefp.dif)], j, align="left", endrule="NA") #take the running mean of the slope, corresponding to the values above
+      
+    }
+    
+    grid_sum_plot = grid_sum %>%
+      as_tibble() %>% 
+      mutate( id = 1:max_interval ) %>% 
+      select( id, everything() ) %>% 
+      pivot_longer( starts_with( "V"),
+                    names_to = "window_size",
+                    values_to = "value") %>% 
+      mutate( window_size = as.numeric( str_remove( window_size, "V" ) ))
+    
+    sum_plot = ggplot( grid_sum_plot, aes( x=id,
+                                           y=window_size,
+                                           fill=value) ) +
+      geom_tile( data=subset(grid_sum_plot,!is.na(value)), col="black", na.rm = TRUE ) +
+      scale_fill_distiller(palette = "PuOr", na.value = NA) +
+      labs( title = "Grid search matrix: sum" )
+    
+    
+    grid_mean_plot = grid_mean %>%
+      as_tibble() %>% 
+      mutate( id = 1:max_interval ) %>% 
+      select( id, everything() ) %>% 
+      pivot_longer( starts_with( "V"),
+                    names_to = "window_size",
+                    values_to = "value") %>% 
+      mutate( window_size = as.numeric( str_remove( window_size, "V" ) ))
+    
+    mean_plot = ggplot( grid_mean_plot, aes( x=id,
+                                             y=window_size,
+                                             fill=value) ) +
+      geom_tile( data=subset(grid_mean_plot,!is.na(value)), col="black", na.rm = TRUE ) +
+      scale_fill_distiller(palette = "PuOr", na.value = NA ) +
+      labs( title = "Grid search matrix: mean" )
+    
+    
+    grid_prop <- grid_sum*(as.numeric(totaldif))^(-1)
+    
+    maxc <- apply(grid_prop, 2, max, na.rm=TRUE) # one value for each window size
+    min_index <- min(which(maxc>slope.lim)) # one value - the first window size that satisfies >slope.lim
+    
+    #Find the steepest slope that falls within this shortest interval and satisfies the XX% requirement:
+    minslopgrid <- which(grid_prop[,min_index] > slope.lim)
+    
+    slopeval <- grid_mean[minslopgrid[which.max(abs(grid_mean[minslopgrid, min_index]))], min_index] ###find the maximum slope, on the shortest interval, that yields over XX% drop
+    
+    ### This is not used anywhere?!
+    interval.full <- const.path[c(tdates[first.index:length(tdates)]-1, NROW(const.path))]
+    
+    if(length(tdates[first.index:length(tdates)])>1){   #if more than one break
+      slopindex <- minslopgrid[which.max(abs(grid_mean[minslopgrid, min_index]))]
+    } else { #if just one break
+      slopindex <- 1   #start at the beginning
+    }
+    
+    window_plot = base_plot
+    
+    if ( min_index > 1 ) {
+      window_plot = window_plot +
+        annotate( "rect",
+                  xmin=minslopgrid-1 + is.first.pknown,
+                  xmax=(minslopgrid+min_index-1) + is.first.pknown,
+                  ymin=rep.int(-Inf,length(minslopgrid)),
+                  ymax=rep.int( Inf,length(minslopgrid)),
+                  alpha=0.3,
+                  fill="lightblue") +
+        geom_vline( xintercept = (minslopgrid+min_index-1)+is.first.pknown,
+                    col = "lightblue")
+    }
+    
+    window_plot = window_plot + 
+      geom_vline( xintercept = minslopgrid + is.first.pknown-1,
+                  col = "lightblue",
+                  size=1) +
+      labs( title = "Window plot",
+            subtitle = glue("Window size = {min_index} // at {combine_words(minslopgrid)}") )
+    
+    
+    coef.p <- const.path
+    coefp.dif.hl <- coefp.dif*NA
+    coefp.dif.hl[(is.first.pknown+slopindex-2):((is.first.pknown+slopindex)+min_index-3) ] <- coefp.dif[(is.first.pknown+slopindex-2):((is.first.pknown+slopindex)+min_index-3) ]
+    
+    ### Store the part of the slope segment evaluated for plotting
+    coef.p.hl <- coef.p*NA
+    coef.p.hl[(is.first.pknown+slopindex-2):((is.first.pknown+slopindex)+min_index-2)] <- const.path[(is.first.pknown+slopindex-2):((is.first.pknown+slopindex)+min_index-2)]
+    result.list[[i]]$is.results$coef.p.hl <- coef.p.hl
+    
+    
+    big.break.index <- which(round(tis.path$coef.var$coef, digits = 4)==round(slopeval, digits = 4))
+    
+    ###Store Slope Results
+    results$is.slope.ma[i] <- slopeval    #slope over the contiguous segment
+    results$is.slope.ma.prop[i] <- slopeval/predrop #slope over the contiguous segment as proportion of prior level
+    results$is.slope.ma.prop.lev[i] <- grid_prop[slopindex,min_index ] #percentage of total drop that the contiguous segment contributes
+    
+    
+    ###Biggest break
+    big.break <- is.first.pknown+slopindex-1 ### which(round(tis.path$coef.var$coef, digits = 4)==round(slopeval, digits = 4))
+    results$is.tfirst.big[i] <- big.break
+    
+    
+    #############################################
+    ##### Measure 3: Magnitude of Change
+    ################################################
+    
+    start.lev <- is.first.pknown-1
+    init.lev <- fit.res[start.lev]
+    end.lev <- fit.res[NROW(fit.res)]
+    
+    ### Store Magnitude Results
+    results$is.intlev.initlev[i] <- init.lev
+    results$is.intlev.finallev[i] <- end.lev
+    results$is.intlev.levd[i] <- as.numeric(init.lev) - as.numeric(end.lev)   #absulte change
+    results$is.intlev.levdprop[i] <-  (as.numeric(init.lev) - as.numeric(end.lev))/as.numeric(init.lev)         #percentage change
+    
+    
+    # filename <- paste(fig_path_tis_analysis, results$name[i], ".png", sep="")
+    # wid <- 500
+    # hei <- 500
+    # png(filename)
+    
+    # real_data = data.frame(
+    #   y=islstr.res$aux$y ) %>%
+    #   mutate( y = ifelse( y==99, NA, y) ) %>% 
+    #   mutate( x = islstr.res$aux$y.index ) %>% 
+    # mutate( set = "real" )
+    # 
+    # trend_data = data.frame(
+    #   y = tis.path$indic.fit$indic.fit+islstr.res$coefficients[islstr.res$specific.spec["mconst"]]
+    # ) %>% 
+    #   mutate( x = islstr.res$aux$y.index ) %>% 
+    #   mutate( set="trend" )
+    # 
+    
+    # plot_data = real_data %>% 
+    #   bind_rows( trend_data )
+    
+    slope_information = coef.p.hl+mconst.res
+    # slope_index = which(!is.na( slope_information ) ) %>% min
+    slope_index = is.first.pknown+slopindex-2
+    
+    slope_plot = base_plot + annotate( "segment",
+                                       x = slope_index,
+                                       xend = slope_index + 1,
+                                       y = slope_information[slope_index ],
+                                       yend = slope_information[ slope_index+1 ],
+                                       size = 5,
+                                       col = rgb(red = 1, green = 0.4118, blue = 0, alpha = 0.5),
+                                       lineend = "round"
+    ) +
+      labs( title = glue("Identifying the steepest slope"),
+            subtitle = glue( "At timepoint {slope_index}, slope={round(slopeval,digits=4)}" ))
+    
+    composite_plot = slope_plot +
+      annotate( "segment",
+                x = rep.int( -Inf, 2 ),
+                xend = rep.int( Inf, 2 ),
+                y=fit.res[c(is.first.pknown-1,length(fit.res))],
+                yend=fit.res[c(is.first.pknown-1,length(fit.res))],
+                linetype="dashed",
+                col="purple", size=1 ) +
+      annotate( "segment",
+                x = tdates[big.break.index],
+                xend = tdates[big.break.index],
+                y=rep.int( Inf, length(big.break.index)),
+                yend=rep.int(-Inf,length(big.break.index)),
+                linetype="dotted",
+                col="blue", size=1 )
+    
+  }
+  
+  plot_matrix = plot_grid( base_plot,
+                           offset_plot,
+                           sum_plot,
+                           mean_plot, 
+                           window_plot,
+                           slope_plot,
+                           composite_plot,
+                           ncol=2 )
+  print( plot_matrix )
+  
+}
+
+```
+
