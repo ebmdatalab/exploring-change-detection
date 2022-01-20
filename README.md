@@ -1,4 +1,4 @@
-This repo documents some exploration that I carroed out into the interpretation of the
+This repo documents some exploration that I carried out into the interpretation of the
 [change detection/indicator saturation](https://github.com/ebmdatalab/change_detection)
 algorithm output.
 
